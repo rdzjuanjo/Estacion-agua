@@ -1,26 +1,24 @@
-#ifndef DATALOGGERWS_H
-#define DATALOGGERWS_H
+// SimpleLoggerWS.h - WebServer avanzado para logs de SimpleLogger con interfaz completa
+#ifndef SIMPLELOGGERWS_H
+#define SIMPLELOGGERWS_H
 
 #include <Arduino.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
-#include <SD.h>
-#include "DataLogger.h"
 
-class DataLoggerWS : public DataLogger {
+class SimpleLoggerWS {
 public:
-  DataLoggerWS() : DataLogger() {
-    serverPtr      = nullptr;
+  SimpleLoggerWS() {
+    serverPtr = nullptr;
     strncpy(_basePath, "/logger", sizeof(_basePath) - 1);
     _basePath[sizeof(_basePath) - 1] = '\0';
-    deviceTimeSet  = false;
+    deviceTimeSet = false;
     deviceTimeMillis = 0;
-    instance       = this;
+    instance = this;
   }
 
   // ── Web server ─────────────────────────────────────────────────────────────
-  // FIX: usamos _basePath dinámicamente en lugar de rutas hardcodeadas
   void beginWebServer(AsyncWebServer& server, const char* path = "/logger") {
     serverPtr = &server;
     if (path) {
@@ -31,16 +29,14 @@ public:
     // Registrar rutas usando el basePath configurado
     String bp = String(_basePath);
     server.on((bp + "/api/stats").c_str(),   HTTP_GET, handleStats);
-    server.on((bp + "/api/logs").c_str(),    HTTP_GET, handleLogs);
     server.on((bp + "/api/files").c_str(),   HTTP_GET, handleFiles);
     server.on((bp + "/api/view").c_str(),    HTTP_GET, handleView);
     server.on((bp + "/api/settime").c_str(), HTTP_GET, handleSetTime);
     server.on((bp + "/download").c_str(),    HTTP_GET, handleDownload);
-    server.on((bp + "/api/clear").c_str(),   HTTP_GET, handleClear);
     server.on((bp + "/api/delete").c_str(),  HTTP_GET, handleDelete);
     server.on(bp.c_str(),                    HTTP_GET, handleRoot);
 
-    Serial.printf("DataLoggerWS: rutas configuradas en '%s'\n", _basePath);
+    Serial.printf("SimpleLoggerWS: rutas configuradas en '%s'\n", _basePath);
   }
 
   // ── Device Timestamp ───────────────────────────────────────────────────────
@@ -53,7 +49,6 @@ public:
 
   bool hasDeviceTime() { return deviceTimeSet; }
 
-  // FIX: se incluyen los segundos residuales (< 60 s) en el cálculo
   String getCalculatedTime() {
     if (!deviceTimeSet) return "No time set";
 
@@ -81,16 +76,13 @@ private:
   unsigned long   deviceTimeMillis;
   bool            deviceTimeSet;
 
-  static DataLoggerWS* instance;
+  static SimpleLoggerWS* instance;
 
   // ── Helpers de tiempo ──────────────────────────────────────────────────────
   void parseTimeString(const char* ts, int& d, int& mo, int& y, int& h, int& mi) {
     sscanf(ts, "%d/%d/%d %d:%d", &d, &mo, &y, &h, &mi);
   }
 
-  // FIX: los segundos residuales (< 60) también se sumarán al convertir a minutos
-  // con la corrección: totalMinutes incluye floor(seconds/60), pero los segundos
-  // descartados no afectan la visualización de HH:MM — comportamiento correcto.
   void addSecondsToTime(int& d, int& mo, int& y, int& h, int& mi, unsigned long secs) {
     unsigned long totalMins = (unsigned long)(h * 60 + mi) + (secs / 60);
     unsigned long extraDays = totalMins / (24 * 60);
@@ -112,16 +104,34 @@ private:
     }
   }
 
+  // ── Utility functions ──────────────────────────────────────────────────────
+  bool isFileSystemReady() { 
+    return LittleFS.totalBytes() > 0; 
+  }
+  
+  uint32_t getTotalSpace() { 
+    return isFileSystemReady() ? LittleFS.totalBytes() : 0; 
+  }
+  
+  uint32_t getFreeSpace() { 
+    return isFileSystemReady() ? (LittleFS.totalBytes() - LittleFS.usedBytes()) : 0; 
+  }
+  
+  float getSpaceUsagePercent() {
+    if (!isFileSystemReady()) return 0.0f;
+    uint32_t total = getTotalSpace();
+    return total > 0 ? ((float)LittleFS.usedBytes() / total) * 100.0f : 0.0f;
+  }
+
   // ── HTML ───────────────────────────────────────────────────────────────────
   static String getHTML() {
-    // UI now matches the styling used by WebHandlers.h for a consistent look
     return R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sensio pH - DataLogger</title>
+  <title>Sensio pH - Logger</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -203,6 +213,18 @@ private:
     .btn-blue   { background: #0d2340; color: var(--accent); border-color: var(--accent); }
     .btn-purple { background: #2a1f3d; color: var(--purple); border-color: var(--purple); }
     .btn-muted  { background: var(--surface-2); color: var(--muted); border-color: var(--border); }
+    .btn-red    { background: #3d1a1a; color: var(--red); border-color: var(--red); }
+
+    /* FILE ITEMS */
+    .file-item {
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--r-md); padding: 15px; margin-bottom: 10px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .item-info h3 { font-size: .9em; font-weight: 600; margin-bottom: 4px; }
+    .item-info p { font-size: .75em; color: var(--muted); }
+    .item-actions { display: flex; gap: 8px; }
+    .item-actions .btn { padding: 8px 12px; font-size: .7em; min-width: auto; }
 
     .error { padding:12px; background:#661d1d; color:#ffb3b3; border-radius:6px; text-align:center; }
     .loading { padding:12px; text-align:center; color:var(--muted); }
@@ -213,7 +235,7 @@ private:
   <div class="header">
     <div>
       <div class="header-title">⬡ SENSIO pH</div>
-      <div class="header-sub">Administrador de Logs</div>
+      <div class="header-sub">Logger de Campo</div>
     </div>
     <div class="header-right">
       <span class="dot-live"></span>LOGGER<br>
@@ -238,20 +260,11 @@ private:
   </div>
 
   <div class="card">
-    <div class="card-header"><span>🗃️</span> Logs Disponibles</div>
-    <div class="card-body">
-      <div id="logs"><div class="loading">Cargando logs...</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-header"><span>📁</span> Archivos CSV</div>
+    <div class="card-header"><span></span> Archivos CSV</div>
     <div class="card-body">
       <div id="files"><div class="loading">Cargando archivos...</div></div>
     </div>
   </div>
-
-  <div class="footer"><span class="dot-live"></span>Sensio pH — ESP32</div>
 </div>
 
 <script>
@@ -275,7 +288,7 @@ private:
         });
     }
 
-    async function loadData() { await loadStats(); await loadLogs(); await loadFiles(); }
+    async function loadData() { await loadStats(); await loadFiles(); }
 
     async function loadStats() {
       try {
@@ -292,31 +305,20 @@ private:
       }
     }
 
-    async function loadLogs() {
-      try {
-        const r = await fetch(`${basePath}/api/logs`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const d = await r.json();
-        let html = d.logs && d.logs.length
-          ? d.logs.map(l => `<div class='log-card'><h3>${l.name}</h3><p>Entradas: ${l.entries}</p>
-              <button onclick="viewLast('${l.name}',50)">Ver últimas 50</button>
-              <button class='danger' onclick="clearLog('${l.name}')">Borrar</button></div>`).join('')
-          : '<p>No hay logs disponibles</p>';
-        document.getElementById('logs').innerHTML = html;
-      } catch(e) {
-        document.getElementById('logs').innerHTML = `<div class='error'>Error logs: ${e.message}</div>`;
-      }
-    }
-
     async function loadFiles() {
       try {
         const r = await fetch(`${basePath}/api/files`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         let html = d.files && d.files.length
-          ? d.files.map(f => `<div class='file-item'><span>${f.name} (${(f.size/1024).toFixed(1)}KB)</span>
-              <div><button onclick="downloadFile('${f.name}')">Descargar</button>
-              <button class='danger' onclick="deleteFile('${f.name}')">Eliminar</button></div></div>`).join('')
+          ? d.files.map(f => `<div class='file-item'>
+              <div class='item-info'><h3>${f.name}</h3><p>${(f.size/1024).toFixed(1)}KB</p></div>
+              <div class='item-actions'>
+                <button class='btn btn-blue' onclick="viewFile('${f.name}')">Ver</button>
+                <button class='btn btn-green' onclick="downloadFile('${f.name}')">Descargar</button>
+                <button class='btn btn-red' onclick="deleteFile('${f.name}')">Eliminar</button>
+              </div>
+            </div>`).join('')
           : '<p>No hay archivos CSV</p>';
         document.getElementById('files').innerHTML = html;
       } catch(e) {
@@ -324,20 +326,11 @@ private:
       }
     }
 
-    function viewLast(logName, count) {
-      window.open(`${basePath}/api/view?log=${encodeURIComponent(logName)}&count=${count}`, '_blank');
+    function viewFile(filename) {
+      window.open(`${basePath}/api/view?file=${encodeURIComponent(filename)}&count=50`, '_blank');
     }
     function downloadFile(filename) {
       window.location.href = `${basePath}/download?file=${encodeURIComponent(filename)}`;
-    }
-    async function clearLog(logName) {
-      if (!confirm(`¿Borrar log ${logName}?`)) return;
-      try {
-        const r = await fetch(`${basePath}/api/clear?log=${encodeURIComponent(logName)}`);
-        const d = await r.json();
-        alert(d.message || d.error);
-        loadData();
-      } catch(e) { alert('Error: ' + e); }
     }
     async function deleteFile(filename) {
       if (!confirm(`¿Eliminar ${filename}?`)) return;
@@ -361,7 +354,7 @@ private:
 
   // ── Handlers estáticos ─────────────────────────────────────────────────────
   static void handleRoot(AsyncWebServerRequest* req) {
-    if (!instance) { req->send(500, "text/plain", "DataLoggerWS no inicializado"); return; }
+    if (!instance) { req->send(500, "text/plain", "SimpleLoggerWS no inicializado"); return; }
     req->send(200, "text/html", getHTML());
   }
 
@@ -375,6 +368,8 @@ private:
 
   static void handleStats(AsyncWebServerRequest* req) {
     if (!instance) { req->send(500, "application/json", "{\"error\":\"no init\"}"); return; }
+    if (!instance->isFileSystemReady()) { req->send(500, "application/json", "{\"error\":\"filesystem not ready\"}"); return; }
+    
     uint32_t total = instance->getTotalSpace();
     uint32_t free  = instance->getFreeSpace();
     float    usage = instance->getSpaceUsagePercent();
@@ -383,30 +378,14 @@ private:
     req->send(200, "application/json", json);
   }
 
-  static void handleLogs(AsyncWebServerRequest* req) {
-    if (!instance) { req->send(500, "application/json", "{\"error\":\"no init\"}"); return; }
-    String   json = "{\"logs\":[";
-    char     name[MAX_LOG_NAME];
-    bool     first = true;
-    uint8_t  cnt   = instance->getLogCount();
-    for (uint8_t i = 0; i < cnt; i++) {
-      if (!instance->getLogName(i, name, sizeof(name))) continue;
-      if (!first) json += ",";
-      json += "{\"name\":\""; json += name;
-      json += "\",\"entries\":"; json += String(instance->getEntryCount(name));
-      json += "}";
-      first = false;
-    }
-    json += "]}";
-    req->send(200, "application/json", json);
-  }
-
   static void handleFiles(AsyncWebServerRequest* req) {
-    if (!instance || !instance->fileSystem) { req->send(500, "application/json", "{\"error\":\"no init\"}"); return; }
+    if (!instance) { req->send(500, "application/json", "{\"error\":\"no init\"}"); return; }
+    if (!instance->isFileSystemReady()) { req->send(500, "application/json", "{\"error\":\"filesystem not ready\"}"); return; }
+    
     String json = "{\"files\":[";
-    bool   first = true;
+    bool first = true;
 
-    File root = (instance->fsType == FS_LITTLEFS) ? LittleFS.open("/") : SD.open("/");
+    File root = LittleFS.open("/");
     if (root) {
       File f = root.openNextFile();
       while (f) {
@@ -414,7 +393,6 @@ private:
         if (!fname.startsWith("/")) fname = "/" + fname;
         if (fname.endsWith(".csv")) {
           if (!first) json += ",";
-          // Nombre sin barra inicial para el cliente
           json += "{\"name\":\"" + fname.substring(1) + "\",\"size\":" + String(f.size()) + "}";
           first = false;
         }
@@ -429,103 +407,127 @@ private:
 
   static void handleView(AsyncWebServerRequest* req) {
     if (!instance) { req->send(500, "text/plain", "no init"); return; }
-    if (!req->hasParam("log") || !req->hasParam("count")) { req->send(400, "text/plain", "Faltan: log, count"); return; }
-
-    String logName = req->getParam("log")->value();
-    int    count   = (int)min(req->getParam("count")->value().toInt(), 100L);
+    if (!instance->isFileSystemReady()) { req->send(500, "text/plain", "filesystem not ready"); return; }
+    
+    String filename;
+    int count = 50;
+    
+    if (req->hasParam("file")) {
+      filename = req->getParam("file")->value();
+      if (!filename.startsWith("/")) filename = "/" + filename;
+    } else if (req->hasParam("log")) {
+      filename = "/" + req->getParam("log")->value();
+    } else {
+      req->send(400, "text/plain", "Falta parámetro: file o log");
+      return;
+    }
+    
+    if (req->hasParam("count")) {
+      int reqCount = req->getParam("count")->value().toInt();
+      count = (reqCount > 100) ? 100 : reqCount;
+    }
 
     String html = "<html><head><meta charset='UTF-8'><style>"
-                  "body{font-family:Arial;padding:20px}"
-                  "table{border-collapse:collapse;width:100%}"
-                  "th,td{border:1px solid #ddd;padding:8px;text-align:left}"
-                  "th{background:#667eea;color:#fff}"
+                  "body{font-family:Arial;padding:20px;background:#0d1117;color:#e6edf3}"
+                  "table{border-collapse:collapse;width:100%;margin-top:20px}"
+                  "th,td{border:1px solid #30363d;padding:8px;text-align:left;font-size:12px}"
+                  "th{background:#21262d;color:#58a6ff;font-weight:bold}"
+                  "tr:nth-child(even){background:#161b22}"
+                  ".header{color:#58a6ff;margin-bottom:10px}"
                   "</style></head><body>";
-    html += "<h2>Log: " + logName + "</h2><table><tr><th>Línea</th><th>Datos</th></tr>";
+    html += "<div class='header'><h2>Log: " + filename + "</h2></div>";
 
-    char filename[64];
-    instance->getCurrentFileName(logName.c_str(), filename, sizeof(filename));
-    File file = instance->fileSystem->open(filename, "r");
+    File file = LittleFS.open(filename, "r");
     if (file) {
+      String lines[101];
+      int lineCount = 0;
+      String header = "";
+      
       if (file.available()) {
-        String hdr = file.readStringUntil('\n'); hdr.trim();
-        html += "<tr><td><strong>HEADER</strong></td><td><strong>" + hdr + "</strong></td></tr>";
+        header = file.readStringUntil('\n');
+        header.trim();
       }
-      int n = 0;
-      while (file.available() && n < count) {
-        String line = file.readStringUntil('\n'); line.trim();
+      
+      while (file.available() && lineCount < 100) {
+        String line = file.readStringUntil('\n');
+        line.trim();
         if (line.length() > 0) {
-          html += "<tr><td>" + String(++n) + "</td><td>" + line + "</td></tr>";
+          lines[lineCount++] = line;
         }
       }
       file.close();
+
+      html += "<table>";
+      if (header.length() > 0) {
+        html += "<tr>";
+        int commaPos = 0, lastPos = 0;
+        while ((commaPos = header.indexOf(',', lastPos)) != -1) {
+          String col = header.substring(lastPos, commaPos);
+          html += "<th>" + col + "</th>";
+          lastPos = commaPos + 1;
+        }
+        html += "<th>" + header.substring(lastPos) + "</th>";
+        html += "</tr>";
+      }
+
+      int startLine = (lineCount > count) ? (lineCount - count) : 0;
+      for (int i = startLine; i < lineCount; i++) {
+        html += "<tr>";
+        int commaPos = 0, lastPos = 0;
+        while ((commaPos = lines[i].indexOf(',', lastPos)) != -1) {
+          String cell = lines[i].substring(lastPos, commaPos);
+          html += "<td>" + cell + "</td>";
+          lastPos = commaPos + 1;
+        }
+        html += "<td>" + lines[i].substring(lastPos) + "</td>";
+        html += "</tr>";
+      }
+      html += "</table>";
     } else {
-      html += "<tr><td colspan='2'>No se pudo abrir: " + String(filename) + "</td></tr>";
+      html += "<p>Error: No se pudo abrir el archivo " + filename + "</p>";
     }
-    html += "</table></body></html>";
+    
+    html += "</body></html>";
     req->send(200, "text/html", html);
   }
 
-  // FIX: descarga SD usa streaming en lugar de readString() (evita crash con archivos grandes)
   static void handleDownload(AsyncWebServerRequest* req) {
     if (!instance) { req->send(500, "text/plain", "no init"); return; }
+    if (!instance->isFileSystemReady()) { req->send(500, "text/plain", "filesystem not ready"); return; }
     if (!req->hasParam("file")) { req->send(400, "text/plain", "Falta: file"); return; }
 
     String fname = req->getParam("file")->value();
     if (!fname.endsWith(".csv")) { req->send(403, "text/plain", "Solo archivos CSV"); return; }
     if (!fname.startsWith("/")) fname = "/" + fname;
 
-    // Verificar existencia (con y sin barra)
-    if (!instance->fileSystem->exists(fname)) {
-      String alt = fname.substring(1);
-      if (instance->fileSystem->exists(alt)) fname = alt;
-      else { req->send(404, "text/plain", "Archivo no encontrado: " + fname); return; }
+    if (!LittleFS.exists(fname)) {
+      req->send(404, "text/plain", "Archivo no encontrado: " + fname);
+      return;
     }
 
     String displayName = fname;
     int slash = displayName.lastIndexOf('/');
     if (slash >= 0) displayName = displayName.substring(slash + 1);
 
-    if (instance->fsType == FS_LITTLEFS) {
-      req->send(LittleFS, fname, "text/csv", true);  // true = attachment
-    } else {
-      // SD: streaming con chunked response
-      File* fp = new File(instance->fileSystem->open(fname, "r"));
-      if (!*fp) { delete fp; req->send(500, "text/plain", "Error al abrir archivo"); return; }
-      AsyncWebServerResponse* resp = req->beginChunkedResponse("text/csv",
-        [fp](uint8_t* buf, size_t maxLen, size_t) -> size_t {
-          if (!fp->available()) { fp->close(); delete fp; return 0; }
-          return fp->read(buf, maxLen);
-        });
-      resp->addHeader("Content-Disposition", "attachment; filename=" + displayName);
-      req->send(resp);
-    }
-  }
-
-  static void handleClear(AsyncWebServerRequest* req) {
-    if (!instance) { req->send(500, "application/json", "{\"error\":\"no init\"}"); return; }
-    if (!req->hasParam("log")) { req->send(400, "application/json", "{\"error\":\"Falta: log\"}"); return; }
-    String logName = req->getParam("log")->value();
-    if (instance->clearLog(logName.c_str()))
-      req->send(200, "application/json", "{\"message\":\"Log borrado correctamente\"}");
-    else
-      req->send(500, "application/json", "{\"error\":\"Error al borrar el log\"}");
+    req->send(LittleFS, fname, "text/csv", true);
   }
 
   static void handleDelete(AsyncWebServerRequest* req) {
     if (!instance) { req->send(500, "application/json", "{\"error\":\"no init\"}"); return; }
+    if (!instance->isFileSystemReady()) { req->send(500, "application/json", "{\"error\":\"filesystem not ready\"}"); return; }
     if (!req->hasParam("file")) { req->send(400, "application/json", "{\"error\":\"Falta: file\"}"); return; }
+    
     String fname = req->getParam("file")->value();
     if (!fname.startsWith("/")) fname = "/" + fname;
 
-    bool ok = instance->fileSystem->remove(fname);
-    if (!ok) ok = instance->fileSystem->remove(fname.substring(1));
-
-    if (ok) req->send(200, "application/json", "{\"message\":\"Archivo eliminado correctamente\"}");
-    else    req->send(500, "application/json", "{\"error\":\"Error al eliminar el archivo\"}");
+    if (LittleFS.remove(fname))
+      req->send(200, "application/json", "{\"message\":\"Archivo eliminado correctamente\"}");
+    else    
+      req->send(500, "application/json", "{\"error\":\"Error al eliminar el archivo\"}");
   }
 };
 
-// Definición del miembro estático (necesaria en header-only)
-DataLoggerWS* DataLoggerWS::instance = nullptr;
+// Definición del miembro estático
+SimpleLoggerWS* SimpleLoggerWS::instance = nullptr;
 
-#endif // DATALOGGERWS_H
+#endif // SIMPLELOGGERWS_H

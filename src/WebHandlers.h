@@ -5,11 +5,72 @@
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
 #include <ElegantOTA.h>
+#include <Wire.h>
+#include <Adafruit_MAX1704X.h>
 #include "leerph.h"
+#include "Config.h"
+#include "TempSensor.h"
 
 // ── Declaraciones externas (definidas en el .ino) ────────────────────────────
 extern AsyncWebSocket   ws;
 extern AsyncWebServer   server;
+
+// ── Sensores globales ─────────────────────────────────────────────────────────
+static TempSensor tempSensor;
+static Adafruit_MAX17048 batteryGauge;
+static bool tempSensorReady = false;
+static bool batteryGaugeReady = false;
+
+// ============================================================================
+//  INICIALIZACION DE SENSORES
+// ============================================================================
+
+void initAdditionalSensors() {
+  // Inicializar sensor de temperatura
+  tempSensor.begin();
+  tempSensorReady = true;
+  Serial.println("[WEBHANDLERS] Sensor de temperatura iniciado");
+
+  // Inicializar medidor de batería
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  if (batteryGauge.begin()) {
+    batteryGaugeReady = true;
+    Serial.printf("[WEBHANDLERS] MAX17048 detectado (chip 0x%X)\n", batteryGauge.getChipID());
+  } else {
+    batteryGaugeReady = false;
+    Serial.println("[WEBHANDLERS] MAX17048 no detectado");
+  }
+}
+
+void updateSensorReadings() {
+  if (tempSensorReady) {
+    tempSensor.loop();
+  }
+}
+
+float getTemperature() {
+  if (!tempSensorReady) return NAN;
+  return tempSensor.getTemperature();
+}
+
+int getBatteryPercent() {
+  if (!batteryGaugeReady) return -1; // Indicador de no conectado
+  float pct = batteryGauge.cellPercent();
+  if (isnan(pct)) return -1;
+  return (int)constrain(pct, 0.0f, 100.0f);
+}
+
+String getTemperatureString() {
+  float temp = getTemperature();
+  if (isnan(temp)) return "NC";
+  return String(temp, 1) + "°C";
+}
+
+String getBatteryString() {
+  int bat = getBatteryPercent();
+  if (bat < 0) return "NC";
+  return String(bat) + "%";
+}
 
 // ============================================================================
 //  FUNCIONES HELPER
@@ -56,6 +117,10 @@ String getPHLabel(float ph) {
 String buildSensorJson() {
   float ph = getpHValue();
   float conductivity = getConductivityPPM();
+  float conductivityRaw = getConductivityValue();
+  float temp = getTemperature();
+  int battery = getBatteryPercent();
+  
   String json = "{";
   json += "\"sensorValue\":"    + String((int)getSensorValue());
   json += ",\"pHValue\":"       + String(ph, 2);
@@ -63,10 +128,15 @@ String buildSensorJson() {
   json += ",\"phLabel\":\""     + getPHLabel(ph)  + "\"";
   json += ",\"slope47\":"       + String(calculateSlope47(),  4);
   json += ",\"slope710\":"      + String(calculateSlope710(), 4);
-  json += ",\"conductivityRaw\":" + String((int)getConductivityValue());
+  json += ",\"conductivityRaw\":" + String((int)conductivityRaw);
   json += ",\"conductivityPPM\":" + String(conductivity, 1);
+  json += ",\"temperature\":"   + (isnan(temp) ? "null" : String(temp, 1));
+  json += ",\"temperatureStr\":\"" + getTemperatureString() + "\"";
+  json += ",\"battery\":"       + (battery < 0 ? "null" : String(battery));
+  json += ",\"batteryStr\":\""  + getBatteryString() + "\"";
   json += ",\"uptime\":"        + String(millis() / 1000);
   json += "}";
+  
   return json;
 }
 
@@ -333,11 +403,6 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
     /* FOOTER */
     .footer { text-align: center; font-family: var(--font-mono); font-size: .73em; color: var(--muted); padding: 8px 0 4px; }
   </style>
-  <!-- load Chart.js UMD build from LittleFS; place chart.umd.js in data/ -->
-  <script src="/chart.umd.js"></script>
-  <!-- if you prefer CDN, replace the line above with:
-       <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
-  -->
 </head>
 <body>
 <div class="page">
@@ -351,6 +416,21 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
     <div class="header-right">
       <span class="dot-live"></span>LIVE<br>
       <span id="uptime">--</span>
+    </div>
+  </div>
+
+  <!-- ESTADO DEL SISTEMA -->
+  <div class="card">
+    <div class="card-header"><span>🔋</span> Estado del Sistema</div>
+    <div class="card-body">
+      <div class="info-row">
+        <span class="info-label">Temperatura</span>
+        <span id="temperatureValue" class="info-value">--</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Batería</span>
+        <span id="batteryValue" class="info-value">--</span>
+      </div>
     </div>
   </div>
 
@@ -454,11 +534,6 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
         4. Lava el electrodo entre mediciones<br>
         5. Repite con pH 7 y pH 10
       </div>
-      <!-- gráfico de ADC para calibración -->
-      <div style="margin-top:16px;">
-        <canvas id="adcChart" style="width:100%;height:200px;"></canvas>
-        <button id="btnResetAdcChart" class="btn btn-muted" style="margin-top:8px;" onclick="resetAdcChart()">RESET</button>
-      </div>
     </div>
   </div>
 
@@ -480,6 +555,9 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
       <a href="/logger" class="btn btn-purple" style="margin-top:8px;">
         <span class="btn-icon">📂</span>ADMINISTRAR LOGS
       </a>
+      <a href="/mqtt" class="btn btn-green" style="margin-top:8px;">
+        <span class="btn-icon">🌐</span>CONFIGURAR MQTT
+      </a>
     </div>
   </div>
 
@@ -491,68 +569,106 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
 (function(){
   var wsConn, retry = 2000, connected = false;
 
-  // datos para las gráficas
-  var phChart, adcChart;
-  var phCounter = 0;
-  var adcCounter = 0;
-  // timestamp base para cada gráfica
-  var phStart = Date.now();
-  var adcStart = Date.now();
-  
-  function createCharts() {
-    phStart = Date.now();
-    adcStart = Date.now();
+  function initWS() {
     try {
-      var phCtx = document.getElementById('phChart').getContext('2d');
-      phChart = new Chart(phCtx, {
-        type: 'line',
-        data: { datasets: [{ label: 'pH', data: [], borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.2)', tension: 0.2 }] },
-        options: {
-          scales: {
-            x: { type: 'linear', title: { display: true, text: 's' }, ticks: { callback: v => v.toFixed(1) } },
-            y: { min: 0, max: 14 }
-          },
-          plugins: { legend: { display: false } }
-        }
-      });
-    } catch(e) { console.error('phChart creation failed', e); }
-    try {
-      var adcCtx = document.getElementById('adcChart').getContext('2d');
-      adcChart = new Chart(adcCtx, {
-        type: 'line',
-        data: { datasets: [{ label: 'ADC', data: [], borderColor: '#d29922', backgroundColor: 'rgba(210,153,34,0.2)', tension: 0.2 }] },
-        options: {
-          scales: {
-            x: { type: 'linear', title: { display: true, text: 's' }, ticks: { callback: v => v.toFixed(1) } },
-            y: { beginAtZero: true }
-          },
-          plugins: { legend: { display: false } }
-        }
-      });
-    } catch(e) { console.error('adcChart creation failed', e); }
+      wsConn = new WebSocket('ws://'+location.host+'/ws');
+      
+      wsConn.onopen = ()=> {
+        console.log('WS conectado');
+        connected = true;
+        document.querySelector('.dot-live').style.background = '#3fb950';
+      };
+      
+      wsConn.onclose = ()=> {
+        console.log('WS cerrado'); 
+        connected = false;
+        document.querySelector('.dot-live').style.background = '#7d8590';
+        setTimeout(initWS, retry);
+      };
+      
+      wsConn.onerror = (e)=> {
+        console.error('WS error',e); 
+        connected = false;
+      };
+      
+      wsConn.onmessage = (e)=> {
+        try {
+          const d = JSON.parse(e.data);
+          
+          // Debug temporal: mostrar datos recibidos cada 10 segundos
+          if (!window.lastDebugTime || Date.now() - window.lastDebugTime > 10000) {
+            window.lastDebugTime = Date.now();
+            console.log('[WS] Datos recibidos:', {
+              temperature: d.temperature,
+              temperatureStr: d.temperatureStr,
+              battery: d.battery, 
+              batteryStr: d.batteryStr
+            });
+          }
+          
+          // Valores principales
+          const el_ph = document.getElementById('phValue');
+          const el_badge = document.getElementById('phBadge');
+          const el_sensor = document.getElementById('sensorValue');
+          const el_cond = document.getElementById('condValue');
+          const el_condSensor = document.getElementById('condSensorValue');
+          const el_uptime = document.getElementById('uptime');
+          const el_sysUptime = document.getElementById('sysUptime');
+          const el_adcForCal = document.getElementById('adcForCal');
+
+          // Nuevos elementos para temperatura y batería
+          const el_temperature = document.getElementById('temperatureValue');
+          const el_battery = document.getElementById('batteryValue');
+
+          if(el_ph) { el_ph.textContent = parseFloat(d.pHValue).toFixed(2); el_ph.style.color = d.phColor; }
+          if(el_badge) { el_badge.textContent = d.phLabel; el_badge.style.color = d.phColor; el_badge.style.borderColor = d.phColor; el_badge.style.background = d.phColor+'22'; }
+          if(el_sensor) el_sensor.textContent = d.sensorValue;
+          if(el_cond) el_cond.textContent = parseFloat(d.conductivityPPM).toFixed(1);
+          if(el_condSensor) el_condSensor.textContent = d.conductivityRaw;
+          if(el_adcForCal) el_adcForCal.textContent = d.sensorValue;
+
+          // Actualizar temperatura y batería
+          if(el_temperature) {
+            el_temperature.textContent = d.temperatureStr;
+            // Debug temporal
+            if (!window.lastTempDebug || Date.now() - window.lastTempDebug > 10000) {
+              window.lastTempDebug = Date.now();
+              console.log('[TEMP] Elemento encontrado:', el_temperature, 'Valor:', d.temperatureStr);
+            }
+          }
+          if(el_battery) {
+            el_battery.textContent = d.batteryStr;
+            // Debug temporal  
+            if (!window.lastBatDebug || Date.now() - window.lastBatDebug > 10000) {
+              window.lastBatDebug = Date.now();
+              console.log('[BAT] Elemento encontrado:', el_battery, 'Valor:', d.batteryStr);
+            }
+          }
+          
+          // Pendientes de calibración
+          const s47  = document.getElementById('slope47');
+          const s710 = document.getElementById('slope710');
+          if (s47)  s47.textContent  = d.slope47  != 0 ? parseFloat(d.slope47).toFixed(4)  : '—';
+          if (s710) s710.textContent = d.slope710 != 0 ? parseFloat(d.slope710).toFixed(4) : '—';
+          
+          // Uptime
+          const uptimeStr = formatUptime(d.uptime);
+          if(el_uptime) el_uptime.textContent = uptimeStr;
+          if(el_sysUptime) el_sysUptime.textContent = uptimeStr;
+          
+        } catch(err) { console.error('JSON parse error:', err); }
+      };
+      
+    } catch(ex) { console.error('initWS error:', ex); setTimeout(initWS, retry); }
   }
 
-  // reset botones
-  window.resetPhChart = function() {
-    if (phChart) {
-      phChart.data.datasets[0].data = [];
-      phChart.update();
-      phStart = Date.now();
-    }
-  };
-  window.resetAdcChart = function() {
-    if (adcChart) {
-      adcChart.data.datasets[0].data = [];
-      adcChart.update();
-      adcStart = Date.now();
-    }
-  };
-
-  // ── Formatear segundos a "1h 2m 3s" ────────────────────────────────────
-  function fmtTime(s) {
-    s = Number(s) || 0;
-    const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
-    let r = ''; if(h>0) r+=h+'h '; if(m>0||h>0) r+=m+'m '; r+=sec+'s'; return r;
+  function formatUptime(sec) {
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);  
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm ' + (sec % 60) + 's';
   }
 
   // ── WebSocket ────────────────────────────────────────────────────────────
@@ -561,7 +677,19 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
     wsConn.onopen    = () => { connected = true; };
     wsConn.onclose   = () => { connected = false; setTimeout(initWS, retry); };
     wsConn.onerror   = () => { connected = false; };
-    wsConn.onmessage = (e) => { try { updateUI(JSON.parse(e.data)); } catch(_){} };
+    wsConn.onmessage = (e) => { try { updateUI(JSON.parse(e.data)); } catch(err) { console.error('WebSocket parse error:', err); } };
+  }
+
+  // ── Funciones de formateo ──────────────────────────────────────────────────
+  function fmtTime(seconds) {
+    if (!seconds || seconds < 0) return "0s";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
   }
 
   // ── Actualizar toda la UI con datos del WebSocket ──────────────────────
@@ -594,35 +722,11 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
     if (condValue) condValue.textContent = parseFloat(d.conductivityPPM).toFixed(1);
     if (condSensorValue) condSensorValue.textContent = d.conductivityRaw;
 
-    // --- actualizar gráficas ---
-    if (phChart) {
-      phCounter++;
-      // sólo añadir cada 6 actualizaciones (~1.2 s)
-      if (phCounter >= 6) {
-        phCounter = 0;
-        const elapsed = (Date.now() - phStart) / 1000;
-        phChart.data.datasets[0].data.push({x: elapsed, y: parseFloat(d.pHValue)});
-        // mantener sólo últimas 20 lecturas
-        if (phChart.data.datasets[0].data.length > 30) {
-          phChart.data.datasets[0].data.shift();
-        }
-        phChart.update('none');
-      }
-    }
-    if (adcChart) {
-      adcCounter++;
-      // añadir cada 6 actualizaciones (~1.2 s) para igualar a pH
-      if (adcCounter >= 6) {
-        adcCounter = 0;
-        const elapsed2 = (Date.now() - adcStart) / 1000;
-        adcChart.data.datasets[0].data.push({x: elapsed2, y: d.sensorValue});
-        // mantener sólo últimas 20 lecturas
-        if (adcChart.data.datasets[0].data.length > 30) {
-          adcChart.data.datasets[0].data.shift();
-        }
-        adcChart.update('none');
-      }
-    }
+    // --- actualizar temperatura y batería ---
+    const tempEl = document.getElementById('temperatureValue');
+    const batEl  = document.getElementById('batteryValue');
+    if(tempEl) tempEl.textContent = d.temperatureStr || 'NC';
+    if(batEl)  batEl.textContent  = d.batteryStr || 'NC';
   }
 
   // ── Calibrar Conductividad ─────────────────────────────────────────────────
@@ -665,7 +769,6 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
       .then(r=>r.text())
       .then(val=>{
         const tile=document.getElementById('calVal'+pH); if(tile) tile.textContent=val;
-        resetAdcChart();
         alert('Calibracion '+lbl[pH]+' guardada! ADC: '+val);
         btn.innerHTML=orig; btn.disabled=false;
       })
@@ -685,8 +788,6 @@ static const char PAGE_HTML[] PROGMEM = R"rawliteral(
   window.addEventListener('load', ()=>{
     loadCalValues();
     initWS();
-    createCharts();
-    console.log('window loaded, Chart object is', typeof Chart);
   });
 })();
 </script>
@@ -709,6 +810,112 @@ void handleRoot(AsyncWebServerRequest *request) {
 void initOTA() {
   ElegantOTA.begin(&server);
   Serial.println("OTA habilitado en /update");
+}
+
+// ============================================================================
+//  MQTT CONFIG HANDLERS
+// ============================================================================
+
+void handleMqttConfig(AsyncWebServerRequest *request) {
+  Preferences p;
+  p.begin("mqttcfg", /*readOnly=*/true);
+  String broker   = p.getString("broker",   "broker.hivemq.com");
+  int    port     = p.getInt   ("port",     1883);
+  String user     = p.getString("user",     "");
+  String clientid = p.getString("clientid", "estacion-agua");
+  String topic    = p.getString("topic",    "estacion/agua");
+#if defined(USE_WIFI)
+  String ssid     = p.getString("ssid",     "");
+#elif defined(USE_SIM800)
+  String apn      = p.getString("apn",      "");
+  String apnuser  = p.getString("apnuser",  "");
+#endif
+  p.end();
+
+  String html = "<!DOCTYPE html><html lang='es'><head>"
+    "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Configurar MQTT</title>"
+    "<style>"
+    "body{background:#0d1117;color:#e6edf3;font-family:'DM Sans',sans-serif;margin:0;padding:20px;}"
+    "h2{color:#58a6ff;margin-bottom:20px;}label{display:block;margin-bottom:4px;color:#7d8590;font-size:.85rem;}"
+    "input{width:100%;box-sizing:border-box;background:#161b22;border:1px solid #30363d;color:#e6edf3;"
+    "border-radius:6px;padding:8px 10px;font-size:.95rem;margin-bottom:14px;}"
+    "input:focus{outline:none;border-color:#58a6ff;}"
+    ".section{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px;}"
+    ".section-title{font-size:.8rem;font-weight:600;color:#58a6ff;text-transform:uppercase;"
+    "letter-spacing:.06em;margin-bottom:12px;}"
+    ".btn-save{background:#3fb950;border:none;color:#0d1117;font-weight:700;padding:10px 24px;"
+    "border-radius:6px;cursor:pointer;font-size:.95rem;margin-right:10px;}"
+    ".btn-back{background:transparent;border:1px solid #30363d;color:#7d8590;padding:10px 20px;"
+    "border-radius:6px;text-decoration:none;font-size:.95rem;}"
+    ".note{color:#7d8590;font-size:.8rem;margin-bottom:14px;}"
+    "</style></head><body>"
+    "<h2>&#127760; Configurar MQTT</h2>"
+    "<form action='/mqtt/save' method='get'>";
+
+#if defined(USE_WIFI)
+  html += "<div class='section'><div class='section-title'>Red WiFi</div>"
+    "<label>SSID</label><input name='ssid' value='" + ssid + "'>"
+    "<label>Contrase&ntilde;a WiFi <span class='note'>(dejar en blanco para no cambiar)</span></label>"
+    "<input name='wifipass' type='password' placeholder='••••••••'>"
+    "</div>";
+#elif defined(USE_SIM800)
+  html += "<div class='section'><div class='section-title'>SIM800 / GPRS</div>"
+    "<label>APN</label><input name='apn' value='" + apn + "'>"
+    "<label>Usuario APN</label><input name='apnuser' value='" + apnuser + "'>"
+    "<label>Contrase&ntilde;a APN <span class='note'>(dejar en blanco para no cambiar)</span></label>"
+    "<input name='apnpass' type='password' placeholder='••••••••'>"
+    "</div>";
+#endif
+
+  html += "<div class='section'><div class='section-title'>Broker MQTT</div>"
+    "<label>Host del broker</label><input name='broker' value='" + broker + "'>"
+    "<label>Puerto</label><input name='port' type='number' min='1' max='65535' value='" + String(port) + "'>"
+    "<label>Usuario (opcional)</label><input name='user' value='" + user + "'>"
+    "<label>Contrase&ntilde;a <span class='note'>(dejar en blanco para no cambiar)</span></label>"
+    "<input name='pass' type='password' placeholder='••••••••'>"
+    "</div>"
+    "<div class='section'><div class='section-title'>Identificaci&oacute;n</div>"
+    "<label>Client ID</label><input name='clientid' value='" + clientid + "'>"
+    "<label>Prefijo de t&oacute;pico</label><input name='topic' value='" + topic + "'>"
+    "<p class='note'>Los datos se publicar&aacute;n en <strong>&lt;prefijo&gt;/data</strong></p>"
+    "</div>"
+    "<button type='submit' class='btn-save'>GUARDAR</button>"
+    "<a href='/' class='btn-back'>VOLVER</a>"
+    "</form></body></html>";
+
+  request->send(200, "text/html", html);
+}
+
+void handleMqttSave(AsyncWebServerRequest *request) {
+  Preferences p;
+  p.begin("mqttcfg", /*readOnly=*/false);
+
+  if (request->hasParam("broker"))   p.putString("broker",   request->getParam("broker")->value());
+  if (request->hasParam("port")) {
+    int port = request->getParam("port")->value().toInt();
+    if (port > 0 && port <= 65535) p.putInt("port", port);
+  }
+  if (request->hasParam("user"))     p.putString("user",     request->getParam("user")->value());
+  if (request->hasParam("pass") && request->getParam("pass")->value().length() > 0)
+    p.putString("pass",     request->getParam("pass")->value());
+  if (request->hasParam("clientid")) p.putString("clientid", request->getParam("clientid")->value());
+  if (request->hasParam("topic"))    p.putString("topic",    request->getParam("topic")->value());
+
+#if defined(USE_WIFI)
+  if (request->hasParam("ssid"))     p.putString("ssid",     request->getParam("ssid")->value());
+  if (request->hasParam("wifipass") && request->getParam("wifipass")->value().length() > 0)
+    p.putString("wifipass", request->getParam("wifipass")->value());
+#elif defined(USE_SIM800)
+  if (request->hasParam("apn"))      p.putString("apn",      request->getParam("apn")->value());
+  if (request->hasParam("apnuser"))  p.putString("apnuser",  request->getParam("apnuser")->value());
+  if (request->hasParam("apnpass") && request->getParam("apnpass")->value().length() > 0)
+    p.putString("apnpass",  request->getParam("apnpass")->value());
+#endif
+
+  p.end();
+  Serial.println("[MQTT] Configuración guardada en NVS");
+  request->redirect("/mqtt");
 }
 
 #endif // WEBHANDLERS_H
